@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>PPOCRLabel辅助标注实体关系（re）</title>
+    <link rel="stylesheet" href="/css/element-plus-index.css" />
+
+    <script src="/js/vue.global.js"></script>
+    <script src="/js/elementui-index.full.js"></script>
+    <script src="/js/fabric.min.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            /* 防止滚动条出现 */
+            font-family: Arial, sans-serif;
+            /* 设置字体 */
+        }
+
+        #app {
+            display: flex;
+            /* 使用 Flexbox 布局 */
+            height: 100vh;
+            /* 使容器高度填满视口 */
+        }
+
+        .canvas-container {
+            flex: 1;
+            /* 使 Canvas 容器占据剩余空间 */
+            display: flex;
+            justify-content: center;
+            /* 水平居中 */
+            align-items: center;
+            /* 垂直居中 */
+            background-color: #f9f9f9;
+            /* 背景颜色 */
+            border-right: 1px solid #ccc;
+            /* 右边框 */
+        }
+
+        canvas {
+            border: 1px solid #ccc;
+            /* Canvas 边框 */
+            width: 100%;
+            /* 设置宽度为100% */
+            height: 100%;
+            /* 设置高度为100% */
+        }
+
+        .controls {
+            width: 300px;
+            /* 控制面板宽度 */
+            padding: 20px;
+            /* 内边距 */
+            background-color: #fff;
+            /* 背景颜色 */
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+            /* 阴影效果 */
+        }
+
+        .controls el-button {
+            width: 100%;
+            /* 按钮宽度 */
+            margin-bottom: 10px;
+            /* 按钮间距 */
+        }
+
+        .controls el-input {
+            margin-bottom: 10px;
+            /* 输入框间距 */
+        }
+
+        .resizer {
+            width: 5px;
+            /* 分隔条的宽度 */
+            cursor: ew-resize;
+            /* 鼠标光标样式 */
+            background-color: #ccc;
+            /* 分隔条颜色 */
+        }
+    </style>
+</head>
+
+<body>
+    <div id="app">
+        <div class="canvas-container">
+            <canvas id="canvas" ref="canvas" width="1200" height="900"></canvas>
+        </div>
+        <div class="resizer" @mousedown="startResize"></div> <!-- 添加分隔条 -->
+        <div class="controls" ref="controls">
+            <el-header>
+                <h2>关系选择器</h2>
+            </el-header>
+            <el-button type="primary" @click="selectFile" style="margin-bottom: 15px;">选择本地图片</el-button>
+            <span>输入 JSON 字符串</span>
+            <el-input type="textarea" placeholder="请输入 JSON 字符串" v-model="jsonInput" :rows="10"
+                style="margin-bottom: 15px;"></el-input>
+            <span>修改后的 JSON 字符串</span>
+            <el-button type="info" @click="copyToClipboard" style="margin-bottom: 10px;">复制结果</el-button> <!-- 新增复制按钮 -->
+            <el-input type="textarea" placeholder="修改后的 JSON 字符串" v-model="modifiedJson" :rows="10" readonly
+                style="margin-bottom: 15px;"></el-input>
+            <el-button type="success" @click="confirmLinking" style="margin-bottom: 10px;">确认关联</el-button>
+            <el-button type="warning" @click="removeLinking" style="margin-bottom: 10px;">取消关联</el-button>
+
+
+            <!-- 添加使用说明 -->
+  
+            <el-row class="w-150px mb-2"><el-text class="mx-1" type="success" size="large">使用说明：</el-text></el-row>
+                
+            <el-row class="w-150px mb-2"><el-text class="mx-1" type="info">1. 第一步选择图片</el-text></el-row>
+            <el-row class="w-150px mb-2"><el-text class="mx-1" type="info">2. 将json粘贴进第一个文本框</el-text></el-row>
+            <el-row class="w-150px mb-2"><el-text class="mx-1" type="info">3. 在图片上选择需要关联的关系，按住ctrl用鼠标左键点选两个实体，点击确认关联即可</el-text></el-row>
+            <el-row class="w-150px mb-2"><el-text class="mx-1" type="info">4. 鼠标滚轮可以放大缩小</el-text></el-row>
+            <el-row class="w-150px mb-2"><el-text class="mx-1" type="info">5. 按住空格可以拖动，但是有bug</el-text></el-row>
+
+              
+            
+            
+            <input type="file" ref="fileInput" @change="onFileChange" accept="image/*" style="display: none;" />
+
+        </div>
+    </div>
+
+    <script>
+        const { createApp } = Vue;
+        const { ElButton, ElContainer, ElHeader, ElMain, ElInput } = ElementPlus;
+
+        createApp({
+            data() {
+                return {
+                    canvas: null, // Fabric.js Canvas 实例
+                    jsonInput: '',
+                    modifiedJson: '', // 用于存储修改后的 JSON 字符串
+                    imgElement: null,
+                    scaleX: 1,
+                    scaleY: 1,
+                    zoom: 1, // 当前缩放比例
+                    selectedPolygons: [], // 存储选中的多边形
+                    isDragging: false, // 拖拽状态标志
+                    isPanning: false, // 是否正在平移
+                    jsonEditor: null, // JSON 编辑器实例
+                    startX: 0, // 拖拽开始时的 X 坐标
+                    startWidth: 0 // 拖拽开始时的宽度
+                };
+            },
+            mounted() {
+                // 初始化 Fabric.js Canvas
+                this.canvas = new fabric.Canvas(this.$refs.canvas);
+
+         
+
+                // 添加鼠标滚轮缩放功能
+                this.canvas.on('mouse:wheel', (opt) => {
+                    const delta = opt.e.deltaY;
+                    const zoom = this.canvas.getZoom();
+                    // 增加缩放速率
+                    const zoomFactor = delta > 0 ? 0.8 : 1.15; // 0.95 和 1.05 可以调整以改变缩放速率
+                    this.canvas.zoomToPoint({ x: opt.e.offsetX, y: opt.e.offsetY }, zoom * zoomFactor);
+                    opt.e.preventDefault();
+                    opt.e.stopPropagation();
+                });
+
+                // 监听空格键按下和松开事件
+                window.addEventListener('keydown', (e) => {
+                    if (e.code === 'Space') {
+                        this.isPanning = true; // 启用平移
+                        this.canvas.defaultCursor = 'grab'; // 改变鼠标光标为抓手
+                    }
+                });
+
+                window.addEventListener('keyup', (e) => {
+                    if (e.code === 'Space') {
+                        this.isPanning = false; // 禁用平移
+                        this.canvas.defaultCursor = 'default'; // 恢复鼠标光标
+                    }
+                });
+
+                // 添加拖拽功能
+                let lastPosX;
+                let lastPosY;
+
+                this.canvas.on('mouse:down', (opt) => {
+                    if (this.isPanning) {
+                        lastPosX = opt.e.clientX;
+                        lastPosY = opt.e.clientY;
+                    } else if (opt.target && opt.target.type === 'polygon') {
+                        // 检查是否按下了 Ctrl 键
+                        if (opt.e.ctrlKey) {
+                            // 切换选择状态
+                            const index = this.selectedPolygons.indexOf(opt.target);
+                            if (index > -1) {
+                                this.selectedPolygons.splice(index, 1); // 取消选择
+                                opt.target.set('fill', 'transparent'); // 恢复多边形颜色
+                            } else {
+                                this.selectedPolygons.push(opt.target); // 添加到选择列表
+                                opt.target.set('fill', 'rgba(0, 0, 255, 0.3)'); // 改变多边形颜色以示选择
+                            }
+                        } else {
+                            // 如果没有按下 Ctrl 键，清空选择
+                            this.selectedPolygons.forEach(polygon => {
+                                polygon.set('fill', 'transparent'); // 恢复多边形颜色
+                            });
+                            this.selectedPolygons = [opt.target]; // 选择当前多边形
+                            opt.target.set('fill', 'rgba(0, 0, 255, 0.3)'); // 改变多边形颜色以示选择
+                        }
+                        this.canvas.renderAll(); // 重新渲染 Canvas
+                    } else {
+                        // 如果点击空白区域，清空选择
+                        this.selectedPolygons.forEach(polygon => {
+                            polygon.set('fill', 'transparent'); // 恢复多边形颜色
+                        });
+                        this.selectedPolygons = [];
+                        this.canvas.renderAll(); // 重新渲染 Canvas
+                    }
+                });
+
+                this.canvas.on('mouse:move', (opt) => {
+                    if (this.isPanning) {
+                        const deltaX = opt.e.clientX - lastPosX;
+                        const deltaY = opt.e.clientY - lastPosY;
+                        this.canvas.relativePan({ x: deltaX, y: deltaY });
+                        lastPosX = opt.e.clientX;
+                        lastPosY = opt.e.clientY;
+                    }
+                });
+
+                this.canvas.on('mouse:up', () => {
+                    this.isPanning = false; // 拖拽结束
+                    this.canvas.defaultCursor = 'default'; // 恢复鼠标光标
+                });
+            },
+            watch: {
+                jsonInput(newValue) {
+                    if (newValue) {
+                        this.drawPolygons(); // 当 jsonInput 有输入时自动调用 drawPolygons
+                        try {
+                            const jsonData = JSON.parse(newValue);
+                      
+                        } catch (e) {
+                            console.error("Invalid JSON input");
+                        }
+                    }
+                },
+                modifiedJson(newValue) {
+                    if (newValue) {
+                        try {
+                           
+                            const jsonData = JSON.parse(newValue);
+                            this.modifiedJson =JSON.stringify(jsonData, null, 0); 
+                      
+
+                        } catch (e) {
+                            console.error("Invalid JSON input");
+                        }
+                    }
+                }
+            },
+            methods: {
+                startResize(event) {
+                    // 记录初始位置
+                    this.startX = event.clientX;
+                    this.startWidth = this.$refs.canvas.parentElement.offsetWidth;
+
+                    // 添加鼠标移动和鼠标松开事件监听器
+                    window.addEventListener('mousemove', this.resize);
+                    window.addEventListener('mouseup', this.stopResize);
+                },
+                resize(event) {
+                    const newWidth = this.startWidth + (event.clientX - this.startX);
+                    if (newWidth > 100) { // 最小宽度限制
+                        this.$refs.canvas.parentElement.style.width = newWidth + 'px';
+                        this.$refs.controls.style.width = (300 - (newWidth - this.startWidth)) + 'px'; // 控制面板宽度
+                    }
+                },
+                stopResize() {
+                    // 移除事件监听器
+                    window.removeEventListener('mousemove', this.resize);
+                    window.removeEventListener('mouseup', this.stopResize);
+                },
+                selectFile() {
+                    this.$refs.fileInput.click();
+                },
+                onFileChange(event) {
+                    const file = event.target.files[0];
+                    if (file) {
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            const imgElement = new Image();
+                            imgElement.src = e.target.result;
+                            imgElement.onload = () => {
+                                this.imgElement = imgElement; // 保存图像元素
+
+                                // 计算缩放比例以保持原有比例
+                                const canvasAspectRatio = this.canvas.width / this.canvas.height;
+                                const imgAspectRatio = imgElement.width / imgElement.height;
+
+                                if (canvasAspectRatio > imgAspectRatio) {
+                                    // Canvas 更宽，限制高度
+                                    this.scaleY = this.canvas.height / imgElement.height;
+                                    this.scaleX = this.scaleY; // 保持比例
+                                } else {
+                                    // Canvas 更高，限制宽度
+                                    this.scaleX = this.canvas.width / imgElement.width;
+                                    this.scaleY = this.scaleX; // 保持比例
+                                }
+
+                                const imgInstance = new fabric.Image(imgElement, {
+                                    left: (this.canvas.width - imgElement.width * this.scaleX) / 2, // 居中显示
+                                    top: (this.canvas.height - imgElement.height * this.scaleY) / 2, // 居中显示
+                                    scaleX: this.scaleX,
+                                    scaleY: this.scaleY
+                                });
+
+                                this.canvas.setBackgroundImage(imgInstance, this.canvas.renderAll.bind(this.canvas));
+                            };
+                        };
+                        reader.readAsDataURL(file);
+                    }
+                },
+                drawPolygons() {
+                    // 清空 Canvas
+                    this.canvas.clear();
+
+                    // 重新绘制背景图像
+                    const imgInstance = new fabric.Image(this.imgElement, {
+                        left: 0,
+                        top: 0,
+                        scaleX: this.scaleX,
+                        scaleY: this.scaleY
+                    });
+                    this.canvas.setBackgroundImage(imgInstance, this.canvas.renderAll.bind(this.canvas));
+
+                    // 解析 JSON 字符串并绘制多边形
+                    let coordinates = this.jsonInput ? JSON.parse(this.jsonInput) : []; // 解析 JSON 字符串
+
+                    // 为每个对象添加 id 和 linking 字段
+                    coordinates = coordinates.map((item, index) => {
+                        if (!item.id) {
+                            item.id = index; // 设置 id 为当前索引
+                        }
+                        if (!item.linking) {
+                            item.linking = []; // 设置 linking 为一个空数组
+                        }
+                        return item;
+                    });
+
+                    // 将修改后的 JSON 转换为格式化字符串并赋值
+                    this.modifiedJson = JSON.stringify(coordinates, null, 2); // 格式化 JSON 字符串
+
+                    // 存储多边形对象以便后续绘制连线
+                    const polygons = {};
+
+                    coordinates.forEach(item => {
+                        const points = item.points; // 获取 points 数组
+                        const polygonPoints = points.map(point => new fabric.Point(point[0] * this.scaleX, point[1] * this.scaleY)); // 转换为 fabric.Point 对象并应用缩放
+                        const polygon = new fabric.Polygon(polygonPoints, {
+                            fill: 'transparent',
+                            stroke: 'green',
+                            strokeWidth: 1,
+                            selectable: true, // 允许选择和移动
+                            id: item.id // 设置 id
+                        });
+                        this.canvas.add(polygon);
+
+                        // 存储多边形以便后续绘制连线
+                        polygons[item.id] = polygon;
+
+                        // 获取多边形的边界框
+                        const boundingRect = polygon.getBoundingRect();
+
+                        // 创建文本对象显示 id 和 key_cls，位置在多边形外部的左上角
+                        const idText = new fabric.Text(`id: ${item.id}`, {
+                            left: boundingRect.left, // 文本的左上角位置
+                            top: boundingRect.top - 10, // 在多边形上方20个像素
+                            fontSize: 5,
+                            fill: 'blue', // ID文本颜色
+                            originX: 'left',
+                            originY: 'top'
+                        });
+
+                        const keyClsText = new fabric.Text(`${item.key_cls}`, {
+                            left: boundingRect.left, // 文本的左上角位置
+                            top: boundingRect.top - 5, // 在多边形上方5个像素
+                            fontSize: 6,
+                            fill: item.key_cls === 'question' ? 'red' : item.key_cls === 'answer' ? 'green' : 'black', // key_cls文本颜色
+                            originX: 'left',
+                            originY: 'top'
+                        });
+
+                        // 将文本对象添加到 Canvas
+                        this.canvas.add(idText);
+                        this.canvas.add(keyClsText);
+                    });
+
+                    // 绘制连线
+                    coordinates.forEach(item => {
+                        const polygon = polygons[item.id]; // 获取对应的多边形对象
+                        item.linking.forEach(link => {
+                            const linkedPolygon = polygons[link[0]]; // 获取链接的多边形
+                            if (linkedPolygon) {
+                                this.drawLineBetweenPolygons(polygon, linkedPolygon); // 绘制连线
+                            }
+                        });
+                    });
+                },
+                drawLineBetweenPolygons(polygon1, polygon2) {
+                    // 获取多边形中心
+                    const center1 = polygon1.getCenterPoint();
+                    const center2 = polygon2.getCenterPoint();
+
+                    // 绘制连接线
+                    const line = new fabric.Line([center1.x, center1.y, center2.x, center2.y], {
+                        stroke: 'purple',
+                        strokeWidth: 2,
+                        selectable: false // 线条不可选
+                    });
+
+                    this.canvas.add(line);
+                    this.canvas.renderAll(); // 重新渲染 Canvas
+                },
+                confirmLinking() {
+                    if (this.selectedPolygons.length === 2) {
+                        const [polygon1, polygon2] = this.selectedPolygons;
+
+                        // 获取多边形中心
+                        const center1 = polygon1.getCenterPoint();
+                        const center2 = polygon2.getCenterPoint();
+
+                        // 绘制连接线
+                        const line = new fabric.Line([center1.x, center1.y, center2.x, center2.y], {
+                            stroke: 'purple',
+                            strokeWidth: 2,
+                            selectable: false // 线条不可选
+                        });
+
+                        this.canvas.add(line);
+                        this.canvas.renderAll();
+
+                        // 更新 JSON 对象中的 linking 字段
+                        const id1 = polygon1.id; // 获取第一个多边形的 id
+                        const id2 = polygon2.id; // 获取第二个多边形的 id
+                        const coordinates = JSON.parse(this.modifiedJson);
+                        const item1 = coordinates.find(item => item.id === id1);
+                        const item2 = coordinates.find(item => item.id === id2);
+
+                        if (item1 && item2) {
+                            item1.linking.push([id1, id2]); // 将第二个多边形的 id 添加到第一个多边形的 linking 中
+                            item2.linking.push([id1, id2]); // 将第一个多边形的 id 添加到第二个多边形的 linking 中
+                        }
+
+                        // 更新 modifiedJson
+                        this.modifiedJson = JSON.stringify(coordinates, null, 2);
+                    }
+                },
+                removeLinking() {
+                    if (this.selectedPolygons.length === 2) {
+                        const [polygon1, polygon2] = this.selectedPolygons;
+
+                        // 获取多边形的 id
+                        const id1 = polygon1.id;
+                        const id2 = polygon2.id;
+
+                        // 解析 JSON 对象
+                        const coordinates = JSON.parse(this.modifiedJson);
+                        const item1 = coordinates.find(item => item.id === id1);
+                        const item2 = coordinates.find(item => item.id === id2);
+
+                        // 检查是否有关联关系
+                        if (item1 && item2 && item1.linking.some(link => link.includes(id2)) && item2.linking.some(link => link.includes(id1))) {
+                            // 移除关联关系
+                            item1.linking = item1.linking.filter(link => !link.includes(id2));
+                            item2.linking = item2.linking.filter(link => !link.includes(id1));
+
+                            // 移除连接线
+                            const lines = this.canvas.getObjects('line');
+                            lines.forEach(line => {
+                                const center1 = polygon1.getCenterPoint();
+                                const center2 = polygon2.getCenterPoint();
+
+                                // 检查线条的起点和终点是否与多边形的中心点相同
+                                if ((line.x1 === center1.x && line.y1 === center1.y && line.x2 === center2.x && line.y2 === center2.y) ||
+                                    (line.x1 === center2.x && line.y1 === center2.y && line.x2 === center1.x && line.y2 === center1.y)) {
+                                    this.canvas.remove(line); // 移除线条
+                                }
+                            });
+
+                            // 更新 modifiedJson
+                            this.modifiedJson = JSON.stringify(coordinates, null, 2);
+                            this.canvas.renderAll(); // 重新渲染 Canvas
+                        } else {
+                            console.log("没有关联关系，无法取消关联");
+                        }
+                    }
+                },
+    copyToClipboard() {
+        // 复制 modifiedJson 到剪贴板
+        navigator.clipboard.writeText(this.modifiedJson)
+            .then(() => {
+                console.log('复制成功！');
+                this.$message.success('复制成功！'); // 使用 Element Plus 的消息提示
+            })
+            .catch(err => {
+                console.error('复制失败:', err);
+                this.$message.error('复制失败，请重试。'); // 使用 Element Plus 的消息提示
+            });
+    }
+            }
+        })
+            .use(ElementPlus)
+            .mount('#app');
+    </script>
+</body>
+
+</html>
